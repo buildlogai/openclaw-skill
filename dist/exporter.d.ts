@@ -1,4 +1,7 @@
-import type { Buildlog, BuildlogMetadata, FileChange, TerminalCommand } from './types.js';
+import type { BuildlogFile, BuildlogMetadata } from './types.js';
+export declare const BUILDLOG_VERSION = "2.0.0";
+export declare const DEFAULT_FORMAT = "slim";
+export declare const MAX_SLIM_SIZE_BYTES: number;
 export interface SessionMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
@@ -14,10 +17,24 @@ export interface SessionMessage {
         type?: string;
     }>;
 }
+export interface FileChangeInfo {
+    path: string;
+    changeType: 'created' | 'modified' | 'deleted';
+    timestamp?: number;
+    content?: string;
+    previousContent?: string;
+}
+export interface TerminalCommandInfo {
+    command: string;
+    cwd?: string;
+    exitCode?: number;
+    output?: string;
+    timestamp?: number;
+}
 export interface SessionHistory {
     messages: SessionMessage[];
-    fileChanges?: FileChange[];
-    terminalCommands?: TerminalCommand[];
+    fileChanges?: FileChangeInfo[];
+    terminalCommands?: TerminalCommandInfo[];
     metadata?: Partial<BuildlogMetadata>;
 }
 export interface ExportOptions {
@@ -25,47 +42,53 @@ export interface ExportOptions {
     description?: string;
     tags?: string[];
     includeSystemMessages?: boolean;
-    includeFileContents?: boolean;
-    maxFileSizeKb?: number;
+    format?: 'slim' | 'full';
     lastN?: number;
     author?: string;
+    aiProvider?: string;
+    editor?: string;
 }
 /**
- * BuildlogExporter - Convert session history to buildlog format
+ * BuildlogExporter - Convert session history to v2 buildlog format
  *
- * Supports retroactive export from session_history
+ * Exports workflow recipes focused on prompts as artifacts.
+ * Supports both slim (default, 2-50KB) and full (with responses) formats.
  */
 export declare class BuildlogExporter {
     private options;
     constructor(options?: Partial<ExportOptions>);
     /**
-     * Export a session history to buildlog format
+     * Export a session history to v2 buildlog format
      */
-    export(history: SessionHistory): Buildlog;
+    export(history: SessionHistory): BuildlogFile;
     /**
      * Export only the last N messages
      */
-    exportLastN(history: SessionHistory, n: number): Buildlog;
+    exportLastN(history: SessionHistory, n: number): BuildlogFile;
     /**
      * Export a range of messages
      */
-    exportRange(history: SessionHistory, start: number, end: number): Buildlog;
+    exportRange(history: SessionHistory, start: number, end: number): BuildlogFile;
     /**
-     * Merge file changes and terminal commands into the timeline
+     * Convert to slim format (strip full data)
      */
-    private convertToEntries;
+    toSlim(buildlog: BuildlogFile): BuildlogFile;
     /**
-     * Convert a session message to a buildlog entry
+     * Merge file changes and terminal commands into the timeline as steps
      */
-    private messageToEntry;
+    private convertToSteps;
     /**
-     * Convert a file change to a buildlog entry
+     * Convert a user message to a prompt step
      */
-    private fileChangeToEntry;
+    private messageToPromptStep;
     /**
-     * Convert a terminal command to a buildlog entry
+     * Convert a file change to an action step
      */
-    private terminalToEntry;
+    private fileChangeToActionStep;
+    /**
+     * Convert a terminal command to a terminal step
+     */
+    private terminalToStep;
     /**
      * Filter messages based on options
      */
@@ -79,7 +102,7 @@ export declare class BuildlogExporter {
      */
     private inferTitle;
     /**
-     * Try to infer a description from the session
+     * Try to infer a description from the steps
      */
     private inferDescription;
     /**
@@ -87,24 +110,20 @@ export declare class BuildlogExporter {
      */
     private inferTags;
     /**
-     * Detect natural chapter breaks in the content
+     * Try to infer outcome from the session
      */
-    private detectChapters;
-    /**
-     * Extract a chapter title from a message
-     */
-    private extractChapterTitle;
-    /**
-     * Truncate content to max size
-     */
-    private truncateContent;
+    private inferOutcome;
     /**
      * Generate a unique ID
      */
     private generateId;
+    /**
+     * Capitalize first letter
+     */
+    private capitalizeFirst;
 }
 /**
  * Convenience function to export a session
  */
-export declare function exportSession(history: SessionHistory, options?: ExportOptions): Buildlog;
+export declare function exportSession(history: SessionHistory, options?: ExportOptions): BuildlogFile;
 //# sourceMappingURL=exporter.d.ts.map

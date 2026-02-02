@@ -1,4 +1,4 @@
-import type { Buildlog } from './types.js';
+import type { BuildlogFile } from './types.js';
 
 export interface UploadConfig {
   apiKey?: string;
@@ -59,7 +59,7 @@ export class BuildlogUploader {
   /**
    * Upload a buildlog
    */
-  async upload(buildlog: Buildlog, options: UploadOptions = {}): Promise<UploadResult> {
+  async upload(buildlog: BuildlogFile, options: UploadOptions = {}): Promise<UploadResult> {
     try {
       const response = await this.request<UploadResult>('/v1/buildlogs', {
         method: 'POST',
@@ -89,7 +89,7 @@ export class BuildlogUploader {
   /**
    * Update an existing buildlog
    */
-  async update(id: string, buildlog: Partial<Buildlog>): Promise<UploadResult> {
+  async update(id: string, buildlog: Partial<BuildlogFile>): Promise<UploadResult> {
     try {
       const response = await this.request<UploadResult>(`/v1/buildlogs/${id}`, {
         method: 'PATCH',
@@ -160,7 +160,7 @@ export class BuildlogUploader {
   /**
    * Generate a shareable link (for anonymous uploads)
    */
-  async createShareLink(buildlog: Buildlog): Promise<UploadResult> {
+  async createShareLink(buildlog: BuildlogFile): Promise<UploadResult> {
     return this.upload(buildlog, {
       isPublic: true,
       allowComments: false,
@@ -206,7 +206,7 @@ export class BuildlogUploader {
     
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'User-Agent': 'buildlog-openclaw-skill/1.0.0',
+      'User-Agent': 'buildlog-openclaw-skill/2.0.0',
     };
 
     if (this.config.apiKey) {
@@ -297,7 +297,7 @@ export class UploadError extends Error {
  * Convenience function to upload a buildlog
  */
 export async function uploadBuildlog(
-  buildlog: Buildlog,
+  buildlog: BuildlogFile,
   config: UploadConfig = {},
   options: UploadOptions = {}
 ): Promise<UploadResult> {

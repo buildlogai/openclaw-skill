@@ -2,7 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BuildlogRecorder = void 0;
 /**
- * BuildlogRecorder - State machine for recording OpenClaw sessions
+ * BuildlogRecorder v2 - Slim workflow format
+ *
+ * Key change from v1: Prompts are the primary artifact.
+ * We capture the workflow, not the full file contents.
  *
  * States: idle -> recording <-> paused -> idle
  */
@@ -11,11 +14,13 @@ class BuildlogRecorder {
     session = null;
     config;
     eventHandlers = new Map();
-    pendingUserMessage = null;
+    lastPromptStep = null;
+    pendingFileChanges = new Map();
     constructor(config = {}) {
         this.config = {
-            includeFileContents: config.includeFileContents ?? true,
-            maxFileSizeKb: config.maxFileSizeKb ?? 100,
+            fullFormat: config.fullFormat ?? false,
+            aiProvider: config.aiProvider ?? 'claude',
+            model: config.model,
         };
     }
     /**
@@ -47,34 +52,38 @@ class BuildlogRecorder {
             id: this.generateId(),
             title,
             startedAt: Date.now(),
-            entries: [],
-            notes: [],
-            chapters: [],
+            steps: [],
+            sequenceCounter: 0,
             metadata: {
                 ...metadata,
                 title,
                 createdAt: new Date().toISOString(),
+                editor: 'openclaw',
+                aiProvider: this.config.aiProvider,
+                model: this.config.model,
             },
+            filesCreated: new Set(),
+            filesModified: new Set(),
         };
         this.state = 'recording';
+        this.lastPromptStep = null;
+        this.pendingFileChanges.clear();
         this.emit('started', { sessionId: this.session.id, title });
     }
     /**
-     * Stop recording and return the session
+     * Stop recording and return the buildlog
      */
-    stop() {
+    stop(outcome) {
         if (this.state === 'idle') {
             throw new Error('Cannot stop: not recording');
         }
-        const session = this.session;
-        if (session) {
-            session.metadata.duration = Date.now() - session.startedAt;
-        }
+        const buildlog = this.toBuildlog(outcome);
         this.state = 'idle';
         this.session = null;
-        this.pendingUserMessage = null;
-        this.emit('stopped', { session });
-        return session;
+        this.lastPromptStep = null;
+        this.pendingFileChanges.clear();
+        this.emit('stopped', { buildlog });
+        return buildlog;
     }
     /**
      * Pause recording
@@ -119,83 +128,190 @@ class BuildlogRecorder {
         }
     }
     /**
-     * Add a note at the current position
+     * Manually add a prompt step
      */
-    addNote(text) {
+    addPrompt(content, options) {
+        if (!this.session) {
+            throw new Error('Cannot add prompt: no active session');
+        }
+        // Flush any pending file changes as an action
+        this.flushPendingChanges();
+        const step = {
+            id: this.generateId(),
+            type: 'prompt',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            content,
+            context: options?.context,
+            intent: options?.intent,
+        };
+        this.session.steps.push(step);
+        this.lastPromptStep = step;
+        this.emit('step_added', { step });
+    }
+    /**
+     * Manually add an action step
+     */
+    addAction(summary, options) {
+        if (!this.session) {
+            throw new Error('Cannot add action: no active session');
+        }
+        // Track files for outcome
+        options?.filesCreated?.forEach(f => this.session.filesCreated.add(f));
+        options?.filesModified?.forEach(f => this.session.filesModified.add(f));
+        const step = {
+            id: this.generateId(),
+            type: 'action',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            summary,
+            filesCreated: options?.filesCreated,
+            filesModified: options?.filesModified,
+            filesDeleted: options?.filesDeleted,
+            approach: options?.approach,
+            aiResponse: this.config.fullFormat ? options?.aiResponse : undefined,
+        };
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
+    }
+    /**
+     * Add a note step
+     */
+    addNote(content, category) {
         if (!this.session) {
             throw new Error('Cannot add note: no active session');
         }
-        this.session.notes.push({
-            timestamp: Date.now(),
-            text,
-            entryIndex: this.session.entries.length,
-        });
-        this.emit('note_added', { text });
-    }
-    /**
-     * Add a chapter marker
-     */
-    addChapter(title) {
-        if (!this.session) {
-            throw new Error('Cannot add chapter: no active session');
-        }
-        this.session.chapters.push({
-            title,
-            entryIndex: this.session.entries.length,
-            timestamp: Date.now(),
-        });
-        this.emit('chapter_added', { title });
-    }
-    /**
-     * Mark the last entry as important
-     */
-    markImportant() {
-        if (!this.session || this.session.entries.length === 0) {
-            throw new Error('Cannot mark: no entries');
-        }
-        const lastEntry = this.session.entries[this.session.entries.length - 1];
-        lastEntry.metadata = {
-            ...lastEntry.metadata,
-            important: true,
+        const step = {
+            id: this.generateId(),
+            type: 'note',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            content,
+            category,
         };
-        this.emit('marked_important', { entryIndex: this.session.entries.length - 1 });
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
+    }
+    /**
+     * Add a checkpoint step
+     */
+    addCheckpoint(label, summary) {
+        if (!this.session) {
+            throw new Error('Cannot add checkpoint: no active session');
+        }
+        const step = {
+            id: this.generateId(),
+            type: 'checkpoint',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            name: label,
+            label: label,
+            summary: summary,
+            description: summary,
+        };
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
+    }
+    /**
+     * Track a file change for the current action
+     */
+    trackFileChange(path, changeType) {
+        if (!this.session)
+            return;
+        if (changeType === 'created') {
+            this.session.filesCreated.add(path);
+        }
+        else if (changeType === 'modified') {
+            this.session.filesModified.add(path);
+        }
+    }
+    /**
+     * Add a terminal command step
+     */
+    addTerminal(command, cwd, exitCode) {
+        if (!this.session) {
+            throw new Error('Cannot add terminal: no active session');
+        }
+        const outcome = exitCode === 0 ? 'success' : exitCode !== undefined ? 'failure' : 'success';
+        const step = {
+            id: this.generateId(),
+            type: 'terminal',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            command,
+            cwd,
+            outcome,
+            exitCode,
+        };
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
+    }
+    /**
+     * Add an error step
+     */
+    addError(message, resolved = false, resolution) {
+        if (!this.session) {
+            throw new Error('Cannot add error: no active session');
+        }
+        const step = {
+            id: this.generateId(),
+            type: 'error',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            message,
+            resolved,
+            resolution,
+        };
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
     }
     /**
      * Get recording status
      */
     getStatus() {
+        const promptCount = this.session?.steps.filter(s => s.type === 'prompt').length ?? 0;
         return {
             state: this.state,
             sessionId: this.session?.id,
             title: this.session?.title,
-            entryCount: this.session?.entries.length ?? 0,
+            stepCount: this.session?.steps.length ?? 0,
+            promptCount,
             duration: this.session ? Date.now() - this.session.startedAt : 0,
-            noteCount: this.session?.notes.length ?? 0,
-            chapterCount: this.session?.chapters.length ?? 0,
         };
     }
     /**
      * Convert session to Buildlog format
      */
-    toBuildlog() {
+    toBuildlog(outcome) {
         if (!this.session) {
             return null;
         }
+        const durationSeconds = Math.round((Date.now() - this.session.startedAt) / 1000);
+        const hasPrompts = this.session.steps.some(s => s.type === 'prompt');
+        const metadata = {
+            id: this.session.id,
+            title: this.session.title,
+            createdAt: new Date(this.session.startedAt).toISOString(),
+            durationSeconds,
+            editor: 'openclaw',
+            aiProvider: this.config.aiProvider,
+            model: this.config.model,
+            replicable: hasPrompts,
+            ...this.session.metadata,
+        };
+        const buildlogOutcome = {
+            status: outcome?.status || (hasPrompts ? 'success' : 'abandoned'),
+            summary: outcome?.summary || `Recorded ${this.session.steps.length} steps`,
+            filesCreated: this.session.filesCreated.size,
+            filesModified: this.session.filesModified.size,
+            canReplicate: hasPrompts,
+        };
         return {
-            version: '1.0.0',
-            metadata: {
-                id: this.session.id,
-                title: this.session.title,
-                createdAt: new Date(this.session.startedAt).toISOString(),
-                duration: Date.now() - this.session.startedAt,
-                entryCount: this.session.entries.length,
-                ...this.session.metadata,
-            },
-            entries: this.session.entries,
-            chapters: this.session.chapters.map((ch) => ({
-                title: ch.title,
-                startIndex: ch.entryIndex,
-            })),
+            version: '2.0.0',
+            format: this.config.fullFormat ? 'full' : 'slim',
+            metadata,
+            steps: this.session.steps,
+            outcome: buildlogOutcome,
         };
     }
     /**
@@ -213,59 +329,93 @@ class BuildlogRecorder {
     }
     // Private methods
     handleUserMessage(event) {
-        const entry = {
-            type: 'user',
-            timestamp: event.timestamp,
-            content: event.data.content,
-            attachments: event.data.attachments?.map((a) => ({
-                type: 'file',
-                name: a.name,
-                content: this.truncateContent(a.content),
-            })),
-        };
-        this.pendingUserMessage = entry;
-        this.session.entries.push(entry);
+        // User messages become prompts
+        const context = event.data.attachments?.map(a => a.name);
+        this.addPrompt(event.data.content, { context });
     }
     handleAssistantMessage(event) {
-        const entry = {
-            type: 'assistant',
-            timestamp: event.timestamp,
-            content: event.data.content,
-            toolCalls: event.data.toolCalls,
-        };
-        this.session.entries.push(entry);
-        this.pendingUserMessage = null;
+        // Flush pending file changes and create an action step
+        this.flushPendingChanges(event.data.content);
     }
     handleFileChange(event) {
-        const fileChange = event.data;
-        // Optionally truncate file content
-        if (fileChange.content && !this.config.includeFileContents) {
-            delete fileChange.content;
+        const { path, action } = event.data;
+        // Track the file change
+        if (action === 'create') {
+            this.pendingFileChanges.set(path, 'create');
+            this.session?.filesCreated.add(path);
         }
-        else if (fileChange.content) {
-            fileChange.content = this.truncateContent(fileChange.content);
+        else if (action === 'modify') {
+            if (!this.pendingFileChanges.has(path)) {
+                this.pendingFileChanges.set(path, 'modify');
+            }
+            this.session?.filesModified.add(path);
         }
-        const entry = {
-            type: 'file_change',
-            timestamp: event.timestamp,
-            fileChange,
-        };
-        this.session.entries.push(entry);
     }
     handleTerminalCommand(event) {
-        const entry = {
+        if (!this.session)
+            return;
+        const { command, output, exitCode } = event.data;
+        const outcome = exitCode === 0 ? 'success' :
+            exitCode === undefined ? 'partial' : 'failure';
+        const step = {
+            id: this.generateId(),
             type: 'terminal',
-            timestamp: event.timestamp,
-            command: event.data,
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            command,
+            outcome,
+            output: this.config.fullFormat ? output : undefined,
+            exitCode,
         };
-        this.session.entries.push(entry);
+        this.session.steps.push(step);
+        this.emit('step_added', { step });
     }
-    truncateContent(content) {
-        const maxBytes = this.config.maxFileSizeKb * 1024;
-        if (content.length <= maxBytes) {
-            return content;
+    /**
+     * Flush pending file changes into an action step
+     */
+    flushPendingChanges(aiResponse) {
+        if (!this.session || this.pendingFileChanges.size === 0) {
+            return;
         }
-        return content.slice(0, maxBytes) + '\n... [truncated]';
+        const filesCreated = [];
+        const filesModified = [];
+        for (const [path, action] of this.pendingFileChanges) {
+            if (action === 'create') {
+                filesCreated.push(path);
+            }
+            else {
+                filesModified.push(path);
+            }
+        }
+        const summary = this.generateActionSummary(filesCreated, filesModified);
+        const step = {
+            id: this.generateId(),
+            type: 'action',
+            timestamp: this.getTimestamp(),
+            sequence: this.session.sequenceCounter++,
+            summary,
+            filesCreated: filesCreated.length > 0 ? filesCreated : undefined,
+            filesModified: filesModified.length > 0 ? filesModified : undefined,
+            aiResponse: this.config.fullFormat ? aiResponse : undefined,
+        };
+        this.session.steps.push(step);
+        this.pendingFileChanges.clear();
+        this.emit('step_added', { step });
+    }
+    generateActionSummary(created, modified) {
+        const parts = [];
+        if (created.length > 0) {
+            parts.push(`Created ${created.length} file${created.length > 1 ? 's' : ''}`);
+        }
+        if (modified.length > 0) {
+            parts.push(`Modified ${modified.length} file${modified.length > 1 ? 's' : ''}`);
+        }
+        return parts.join(', ') || 'Code changes';
+    }
+    getTimestamp() {
+        if (!this.session)
+            return 0;
+        return Math.round((Date.now() - this.session.startedAt) / 1000);
     }
     generateId() {
         return `bl_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;

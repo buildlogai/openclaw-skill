@@ -1,6 +1,6 @@
-import type { Buildlog } from './types.js';
-import { BuildlogRecorder, type OpenClawEvent, type RecordingSession } from './recorder.js';
-import { BuildlogExporter, type SessionHistory, type ExportOptions } from './exporter.js';
+import type { BuildlogFile, AIProvider } from './types.js';
+import { BuildlogRecorder, type RecorderConfig, type RecordingSession } from './recorder.js';
+import { BuildlogExporter, type SessionHistory, type ExportOptions, BUILDLOG_VERSION } from './exporter.js';
 import { BuildlogUploader, type UploadConfig, type UploadOptions, type UploadResult } from './uploader.js';
 
 /**
@@ -25,8 +25,8 @@ export interface SkillConfig {
   apiKey?: string;
   autoUpload?: boolean;
   defaultPublic?: boolean;
-  includeFileContents?: boolean;
-  maxFileSizeKb?: number;
+  fullFormat?: boolean; // If true, include responses/diffs (larger files)
+  aiProvider?: string;
 }
 
 export interface CommandMatch {
@@ -36,13 +36,16 @@ export interface CommandMatch {
 
 /**
  * BuildlogSkill - Main skill implementation for OpenClaw
+ * 
+ * v2: Captures workflow recipes, not session replays.
+ * Prompts are the artifact. Code is ephemeral.
  */
 export class BuildlogSkill {
   private recorder: BuildlogRecorder;
   private exporter: BuildlogExporter;
   private uploader: BuildlogUploader;
   private config: SkillConfig;
-  private lastBuildlog: Buildlog | null = null;
+  private lastBuildlog: BuildlogFile | null = null;
   private unsubscribers: Array<() => void> = [];
 
   // Command patterns for natural language matching
@@ -87,20 +90,25 @@ export class BuildlogSkill {
       pattern: /^share\s+(the\s+)?buildlog$/i,
       handler: this.handleShare.bind(this),
     },
+    // Add prompt (explicit)
+    {
+      pattern: /^add\s+(a\s+)?prompt[:\-]?\s+(.+)$/i,
+      handler: this.handleAddPrompt.bind(this),
+    },
+    // Add action
+    {
+      pattern: /^add\s+(an\s+)?action[:\-]?\s+(.+)$/i,
+      handler: this.handleAddAction.bind(this),
+    },
     // Add note
     {
       pattern: /^add\s+(a\s+)?note[:\-]?\s+(.+)$/i,
       handler: this.handleAddNote.bind(this),
     },
-    // Add chapter
+    // Add checkpoint
     {
-      pattern: /^add\s+(a\s+)?chapter[:\-]?\s+(.+)$/i,
-      handler: this.handleAddChapter.bind(this),
-    },
-    // Mark important
-    {
-      pattern: /^mark\s+(this\s+)?(as\s+)?important$/i,
-      handler: this.handleMarkImportant.bind(this),
+      pattern: /^(add\s+)?(checkpoint|milestone)[:\-]?\s+(.+)$/i,
+      handler: this.handleAddCheckpoint.bind(this),
     },
     // Check status
     {
@@ -117,14 +125,16 @@ export class BuildlogSkill {
   constructor(config: SkillConfig = {}) {
     this.config = config;
 
-    this.recorder = new BuildlogRecorder({
-      includeFileContents: config.includeFileContents ?? true,
-      maxFileSizeKb: config.maxFileSizeKb ?? 100,
-    });
+    const recorderConfig: RecorderConfig = {
+      fullFormat: config.fullFormat ?? false,
+      aiProvider: (config.aiProvider ?? 'other') as AIProvider,
+    };
+
+    this.recorder = new BuildlogRecorder(recorderConfig);
 
     this.exporter = new BuildlogExporter({
-      includeFileContents: config.includeFileContents ?? true,
-      maxFileSizeKb: config.maxFileSizeKb ?? 100,
+      format: config.fullFormat ? 'full' : 'slim',
+      aiProvider: config.aiProvider,
     });
 
     this.uploader = new BuildlogUploader({
@@ -179,11 +189,11 @@ export class BuildlogSkill {
   // Command handlers
 
   private async handleStart(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
-    const title = match[3]?.trim() || 'Untitled Buildlog';
+    const title = match[3]?.trim() || 'Untitled Workflow';
 
     try {
       this.recorder.start(title);
-      ctx.respond(`🔴 Recording started: "${title}"\n\nI'll capture this session. Say "stop the buildlog" when you're done.`);
+      ctx.respond(`🔴 Recording started: "${title}"\n\nI'll capture this workflow. Say "stop the buildlog" when you're done.`);
       ctx.events.emit('buildlog:started', { title });
     } catch (error) {
       ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to start recording'}`);
@@ -198,21 +208,22 @@ export class BuildlogSkill {
         return;
       }
 
-      this.lastBuildlog = this.sessionToBuildlog(session);
-      const entryCount = this.lastBuildlog.entries.length;
+      this.lastBuildlog = this.recorder.toBuildlog();
+      const stepCount = this.lastBuildlog?.steps.length ?? 0;
+      const promptCount = this.lastBuildlog?.metadata?.promptCount ?? 0;
 
-      ctx.events.emit('buildlog:stopped', { entryCount });
+      ctx.events.emit('buildlog:stopped', { stepCount, promptCount });
 
       if (this.config.autoUpload) {
         const result = await this.uploadBuildlog(ctx);
         if (result.success) {
-          ctx.respond(`✅ Recording stopped. ${entryCount} exchanges captured and uploaded.\n\n🔗 ${result.url}`);
+          ctx.respond(`✅ Workflow captured. ${promptCount} prompts, ${stepCount} steps.\n\n🔗 ${result.url}`);
         } else {
-          ctx.respond(`✅ Recording stopped. ${entryCount} exchanges captured.\n\n❌ Upload failed: ${result.error}\n\nSay "upload the buildlog" to try again.`);
+          ctx.respond(`✅ Workflow captured. ${promptCount} prompts, ${stepCount} steps.\n\n❌ Upload failed: ${result.error}\n\nSay "upload the buildlog" to try again.`);
         }
       } else {
         const shouldUpload = await ctx.confirm(
-          `Recording stopped. ${entryCount} exchanges captured.\n\nWould you like to upload to buildlog.ai?`
+          `Workflow captured. ${promptCount} prompts, ${stepCount} steps.\n\nUpload to buildlog.ai?`
         );
 
         if (shouldUpload) {
@@ -249,10 +260,11 @@ export class BuildlogSkill {
   private async handleExport(ctx: OpenClawContext, _match: RegExpMatchArray): Promise<void> {
     try {
       this.lastBuildlog = this.exporter.export(ctx.session.history);
-      const entryCount = this.lastBuildlog.entries.length;
-      const title = this.lastBuildlog.metadata.title;
+      const stepCount = this.lastBuildlog?.steps.length ?? 0;
+      const promptCount = this.lastBuildlog?.metadata?.promptCount ?? 0;
+      const title = this.lastBuildlog?.metadata?.title ?? 'Untitled';
 
-      ctx.respond(`✅ Exported ${entryCount} exchanges as buildlog.\n\n📝 Title: "${title}"\n\nSay "upload the buildlog" to share on buildlog.ai.`);
+      ctx.respond(`✅ Exported workflow: "${title}"\n\n📊 ${promptCount} prompts, ${stepCount} steps\n\nSay "upload the buildlog" to share.`);
     } catch (error) {
       ctx.respond(`❌ Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -263,9 +275,9 @@ export class BuildlogSkill {
 
     try {
       this.lastBuildlog = this.exporter.exportLastN(ctx.session.history, n);
-      const entryCount = this.lastBuildlog.entries.length;
+      const stepCount = this.lastBuildlog.steps.length;
 
-      ctx.respond(`✅ Exported last ${entryCount} exchanges as buildlog.\n\nSay "upload the buildlog" to share.`);
+      ctx.respond(`✅ Exported last ${n} exchanges as workflow (${stepCount} steps).\n\nSay "upload the buildlog" to share.`);
     } catch (error) {
       ctx.respond(`❌ Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -302,6 +314,38 @@ export class BuildlogSkill {
     await this.handleUpload(ctx, match);
   }
 
+  private async handleAddPrompt(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
+    const promptText = match[2]?.trim();
+
+    if (!promptText) {
+      ctx.respond('❌ Please provide prompt text. Example: "add a prompt: Create a React component"');
+      return;
+    }
+
+    try {
+      this.recorder.addPrompt(promptText);
+      ctx.respond(`💬 Prompt added: "${promptText.slice(0, 50)}${promptText.length > 50 ? '...' : ''}"`);
+    } catch (error) {
+      ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to add prompt'}`);
+    }
+  }
+
+  private async handleAddAction(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
+    const summary = match[2]?.trim();
+
+    if (!summary) {
+      ctx.respond('❌ Please provide action summary. Example: "add an action: Created user service"');
+      return;
+    }
+
+    try {
+      this.recorder.addAction(summary, {});
+      ctx.respond(`⚡ Action added: "${summary}"`);
+    } catch (error) {
+      ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to add action'}`);
+    }
+  }
+
   private async handleAddNote(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
     const noteText = match[2]?.trim();
 
@@ -318,28 +362,19 @@ export class BuildlogSkill {
     }
   }
 
-  private async handleAddChapter(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
-    const title = match[2]?.trim();
+  private async handleAddCheckpoint(ctx: OpenClawContext, match: RegExpMatchArray): Promise<void> {
+    const label = match[3]?.trim();
 
-    if (!title) {
-      ctx.respond('❌ Please provide chapter title. Example: "add chapter: Setup"');
+    if (!label) {
+      ctx.respond('❌ Please provide checkpoint label. Example: "checkpoint: Feature complete"');
       return;
     }
 
     try {
-      this.recorder.addChapter(title);
-      ctx.respond(`📖 Chapter added: "${title}"`);
+      this.recorder.addCheckpoint(label);
+      ctx.respond(`🏁 Checkpoint added: "${label}"`);
     } catch (error) {
-      ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to add chapter'}`);
-    }
-  }
-
-  private async handleMarkImportant(ctx: OpenClawContext, _match: RegExpMatchArray): Promise<void> {
-    try {
-      this.recorder.markImportant();
-      ctx.respond('⭐ Marked as important');
-    } catch (error) {
-      ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to mark important'}`);
+      ctx.respond(`❌ ${error instanceof Error ? error.message : 'Failed to add checkpoint'}`);
     }
   }
 
@@ -360,13 +395,12 @@ export class BuildlogSkill {
 
       message += `\n\n📝 Title: "${status.title}"`;
       message += `\n⏱️ Duration: ${minutes}m ${seconds}s`;
-      message += `\n💬 Exchanges: ${status.entryCount}`;
-      if (status.noteCount > 0) message += `\n📝 Notes: ${status.noteCount}`;
-      if (status.chapterCount > 0) message += `\n📖 Chapters: ${status.chapterCount}`;
+      message += `\n💬 Prompts: ${status.promptCount}`;
+      message += `\n📊 Total steps: ${status.stepCount}`;
     }
 
     if (this.lastBuildlog && status.state === 'idle') {
-      message += `\n\n📦 Last buildlog ready to upload (${this.lastBuildlog.entries.length} entries)`;
+      message += `\n\n📦 Last buildlog ready to upload (${this.lastBuildlog.steps.length} steps)`;
     }
 
     ctx.respond(message);
@@ -379,64 +413,29 @@ export class BuildlogSkill {
   // Private helpers
 
   private subscribeToEvents(ctx: OpenClawContext): void {
-    // Subscribe to user messages
+    // Subscribe to user messages (capture as prompts)
     const unsubUser = ctx.events.on('user_message', (data) => {
-      this.recorder.handleEvent({
-        type: 'user_message',
-        timestamp: Date.now(),
-        data,
-      });
+      const msg = data as { content?: string; context?: string[] };
+      if (msg.content) {
+        this.recorder.addPrompt(msg.content, { context: msg.context });
+      }
     });
     this.unsubscribers.push(unsubUser);
 
-    // Subscribe to assistant messages
-    const unsubAssistant = ctx.events.on('assistant_message', (data) => {
-      this.recorder.handleEvent({
-        type: 'assistant_message',
-        timestamp: Date.now(),
-        data,
-      });
-    });
-    this.unsubscribers.push(unsubAssistant);
-
-    // Subscribe to file changes
+    // Subscribe to file changes (batch into actions)
     const unsubFiles = ctx.events.on('file_change', (data) => {
-      this.recorder.handleEvent({
-        type: 'file_change',
-        timestamp: Date.now(),
-        data,
-      });
+      const change = data as { path: string; changeType?: string };
+      // File changes are tracked internally and batched
+      this.recorder.trackFileChange(change.path, (change.changeType as 'created' | 'modified' | 'deleted') ?? 'modified');
     });
     this.unsubscribers.push(unsubFiles);
 
     // Subscribe to terminal commands
     const unsubTerminal = ctx.events.on('terminal_command', (data) => {
-      this.recorder.handleEvent({
-        type: 'terminal_command',
-        timestamp: Date.now(),
-        data,
-      });
+      const cmd = data as { command: string; cwd?: string; exitCode?: number };
+      this.recorder.addTerminal(cmd.command, cmd.cwd, cmd.exitCode);
     });
     this.unsubscribers.push(unsubTerminal);
-  }
-
-  private sessionToBuildlog(session: RecordingSession): Buildlog {
-    return {
-      version: '1.0.0',
-      metadata: {
-        id: session.id,
-        title: session.title,
-        createdAt: new Date(session.startedAt).toISOString(),
-        duration: Date.now() - session.startedAt,
-        entryCount: session.entries.length,
-        ...session.metadata,
-      },
-      entries: session.entries,
-      chapters: session.chapters.map((ch) => ({
-        title: ch.title,
-        startIndex: ch.entryIndex,
-      })),
-    };
   }
 
   private async uploadBuildlog(ctx: OpenClawContext): Promise<UploadResult> {

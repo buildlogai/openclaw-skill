@@ -1,16 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BuildlogExporter = void 0;
+exports.BuildlogExporter = exports.MAX_SLIM_SIZE_BYTES = exports.DEFAULT_FORMAT = exports.BUILDLOG_VERSION = void 0;
 exports.exportSession = exportSession;
+// Re-export constants
+exports.BUILDLOG_VERSION = '2.0.0';
+exports.DEFAULT_FORMAT = 'slim';
+exports.MAX_SLIM_SIZE_BYTES = 100 * 1024; // 100KB
 const DEFAULT_OPTIONS = {
     includeSystemMessages: false,
-    includeFileContents: true,
-    maxFileSizeKb: 100,
+    format: 'slim',
 };
 /**
- * BuildlogExporter - Convert session history to buildlog format
+ * BuildlogExporter - Convert session history to v2 buildlog format
  *
- * Supports retroactive export from session_history
+ * Exports workflow recipes focused on prompts as artifacts.
+ * Supports both slim (default, 2-50KB) and full (with responses) formats.
  */
 class BuildlogExporter {
     options;
@@ -18,18 +22,24 @@ class BuildlogExporter {
         this.options = { ...DEFAULT_OPTIONS, ...options };
     }
     /**
-     * Export a session history to buildlog format
+     * Export a session history to v2 buildlog format
      */
     export(history) {
         const messages = this.filterMessages(history.messages);
-        const entries = this.convertToEntries(messages, history);
-        const metadata = this.buildMetadata(history, entries);
-        return {
-            version: '1.0.0',
+        const steps = this.convertToSteps(messages, history);
+        const metadata = this.buildMetadata(history, steps);
+        const buildlog = {
+            version: exports.BUILDLOG_VERSION,
+            format: this.options.format ?? 'slim',
             metadata,
-            entries,
-            chapters: this.detectChapters(entries),
+            steps,
         };
+        // Add outcome if we can infer it
+        const outcome = this.inferOutcome(history);
+        if (outcome) {
+            buildlog.outcome = outcome;
+        }
+        return buildlog;
     }
     /**
      * Export only the last N messages
@@ -52,31 +62,57 @@ class BuildlogExporter {
         return this.export(limitedHistory);
     }
     /**
-     * Merge file changes and terminal commands into the timeline
+     * Convert to slim format (strip full data)
      */
-    convertToEntries(messages, history) {
-        const entries = [];
+    toSlim(buildlog) {
+        if (buildlog.format === 'slim') {
+            return buildlog;
+        }
+        const slim = {
+            ...buildlog,
+            format: 'slim',
+            steps: buildlog.steps.map((step) => {
+                if (step.type === 'prompt' && 'response' in step) {
+                    const { response, ...rest } = step;
+                    return rest;
+                }
+                if (step.type === 'action' && 'diff' in step) {
+                    const { diff, ...rest } = step;
+                    return rest;
+                }
+                return step;
+            }),
+        };
+        return slim;
+    }
+    /**
+     * Merge file changes and terminal commands into the timeline as steps
+     */
+    convertToSteps(messages, history) {
+        const steps = [];
         // Create a timeline of all events
         const timeline = [];
-        // Add messages to timeline
+        // Add user messages as prompts
         for (const msg of messages) {
-            timeline.push({
-                timestamp: msg.timestamp ?? Date.now(),
-                type: 'message',
-                data: msg,
-            });
+            if (msg.role === 'user') {
+                timeline.push({
+                    timestamp: msg.timestamp ?? Date.now(),
+                    type: 'prompt',
+                    data: msg,
+                });
+            }
         }
-        // Add file changes to timeline
+        // Add file changes as actions
         if (history.fileChanges) {
             for (const fc of history.fileChanges) {
                 timeline.push({
                     timestamp: fc.timestamp ?? Date.now(),
-                    type: 'file',
+                    type: 'action',
                     data: fc,
                 });
             }
         }
-        // Add terminal commands to timeline
+        // Add terminal commands
         if (history.terminalCommands) {
             for (const cmd of history.terminalCommands) {
                 timeline.push({
@@ -88,84 +124,78 @@ class BuildlogExporter {
         }
         // Sort by timestamp
         timeline.sort((a, b) => a.timestamp - b.timestamp);
-        // Convert to entries
+        // Convert to steps
+        let stepIndex = 0;
         for (const event of timeline) {
             switch (event.type) {
-                case 'message':
-                    entries.push(this.messageToEntry(event.data, event.timestamp));
+                case 'prompt':
+                    steps.push(this.messageToPromptStep(event.data, event.timestamp, stepIndex++));
                     break;
-                case 'file':
-                    entries.push(this.fileChangeToEntry(event.data, event.timestamp));
+                case 'action':
+                    steps.push(this.fileChangeToActionStep(event.data, event.timestamp, stepIndex++));
                     break;
                 case 'terminal':
-                    entries.push(this.terminalToEntry(event.data, event.timestamp));
+                    steps.push(this.terminalToStep(event.data, event.timestamp, stepIndex++));
                     break;
             }
         }
-        return entries;
+        return steps;
     }
     /**
-     * Convert a session message to a buildlog entry
+     * Convert a user message to a prompt step
      */
-    messageToEntry(message, timestamp) {
-        const entry = {
-            type: message.role === 'user' ? 'user' : 'assistant',
+    messageToPromptStep(message, timestamp, index) {
+        const step = {
+            type: 'prompt',
             timestamp,
+            index,
             content: message.content,
         };
-        if (message.toolCalls && message.toolCalls.length > 0) {
-            entry.toolCalls = message.toolCalls.map((tc) => ({
-                name: tc.name,
-                arguments: tc.arguments,
-                result: tc.result,
-            }));
-        }
+        // Add context if there are attachments
         if (message.attachments && message.attachments.length > 0) {
-            entry.attachments = message.attachments.map((a) => ({
-                type: a.type ?? 'file',
-                name: a.name,
-                content: this.options.includeFileContents
-                    ? this.truncateContent(a.content)
-                    : undefined,
-            }));
+            step.context = message.attachments.map((a) => a.name);
         }
-        return entry;
+        return step;
     }
     /**
-     * Convert a file change to a buildlog entry
+     * Convert a file change to an action step
      */
-    fileChangeToEntry(fileChange, timestamp) {
-        const fc = { ...fileChange };
-        if (!this.options.includeFileContents) {
-            delete fc.content;
-            delete fc.previousContent;
-        }
-        else {
-            if (fc.content) {
-                fc.content = this.truncateContent(fc.content);
-            }
-            if (fc.previousContent) {
-                fc.previousContent = this.truncateContent(fc.previousContent);
-            }
-        }
-        return {
-            type: 'file_change',
+    fileChangeToActionStep(fileChange, timestamp, index) {
+        const step = {
+            type: 'action',
             timestamp,
-            fileChange: fc,
+            index,
+            summary: `${this.capitalizeFirst(fileChange.changeType)} ${fileChange.path}`,
+            files: [fileChange.path],
+            changeType: fileChange.changeType,
         };
+        // Only include diff in full format
+        if (this.options.format === 'full' && fileChange.content) {
+            step.diff = fileChange.content;
+        }
+        return step;
     }
     /**
-     * Convert a terminal command to a buildlog entry
+     * Convert a terminal command to a terminal step
      */
-    terminalToEntry(command, timestamp) {
-        return {
+    terminalToStep(command, timestamp, index) {
+        const step = {
             type: 'terminal',
             timestamp,
-            command: {
-                ...command,
-                output: command.output ? this.truncateContent(command.output) : undefined,
-            },
+            index,
+            command: command.command,
         };
+        if (command.cwd) {
+            step.cwd = command.cwd;
+        }
+        if (command.exitCode !== undefined) {
+            step.exitCode = command.exitCode;
+        }
+        // Only include output in full format
+        if (this.options.format === 'full' && command.output) {
+            step.output = command.output;
+        }
+        return step;
     }
     /**
      * Filter messages based on options
@@ -185,23 +215,49 @@ class BuildlogExporter {
     /**
      * Build metadata for the buildlog
      */
-    buildMetadata(history, entries) {
+    buildMetadata(history, steps) {
         const now = new Date().toISOString();
-        const timestamps = entries.map((e) => e.timestamp).filter(Boolean);
+        const timestamps = steps.map((s) => s.timestamp).filter(Boolean);
         const duration = timestamps.length >= 2
             ? Math.max(...timestamps) - Math.min(...timestamps)
             : 0;
-        return {
+        const promptCount = steps.filter((s) => s.type === 'prompt').length;
+        const metadata = {
             id: this.generateId(),
-            title: this.options.title ?? this.inferTitle(history) ?? 'Untitled Session',
-            description: this.options.description ?? this.inferDescription(history),
+            title: this.options.title ?? this.inferTitle(history) ?? 'Untitled Workflow',
             createdAt: now,
-            duration,
-            entryCount: entries.length,
-            tags: this.options.tags ?? this.inferTags(history),
-            author: this.options.author,
-            ...history.metadata,
         };
+        if (this.options.description) {
+            metadata.description = this.options.description;
+        }
+        else {
+            const inferred = this.inferDescription(steps);
+            if (inferred)
+                metadata.description = inferred;
+        }
+        if (duration > 0)
+            metadata.duration = duration;
+        if (this.options.author)
+            metadata.author = { name: this.options.author };
+        if (this.options.tags && this.options.tags.length > 0) {
+            metadata.tags = this.options.tags;
+        }
+        else {
+            const inferredTags = this.inferTags(history);
+            if (inferredTags.length > 0)
+                metadata.tags = inferredTags;
+        }
+        metadata.stepCount = steps.length;
+        metadata.promptCount = promptCount;
+        if (this.options.aiProvider)
+            metadata.aiProvider = this.options.aiProvider;
+        if (this.options.editor)
+            metadata.editor = this.options.editor;
+        // Merge with session metadata
+        if (history.metadata) {
+            Object.assign(metadata, history.metadata);
+        }
+        return metadata;
     }
     /**
      * Try to infer a title from the session content
@@ -221,20 +277,20 @@ class BuildlogExporter {
         return firstLine.slice(0, 57) + '...';
     }
     /**
-     * Try to infer a description from the session
+     * Try to infer a description from the steps
      */
-    inferDescription(history) {
-        const messageCount = history.messages.filter((m) => m.role !== 'system').length;
-        const fileCount = history.fileChanges?.length ?? 0;
-        const cmdCount = history.terminalCommands?.length ?? 0;
+    inferDescription(steps) {
+        const promptCount = steps.filter((s) => s.type === 'prompt').length;
+        const actionCount = steps.filter((s) => s.type === 'action').length;
+        const terminalCount = steps.filter((s) => s.type === 'terminal').length;
         const parts = [];
-        if (messageCount > 0)
-            parts.push(`${messageCount} messages`);
-        if (fileCount > 0)
-            parts.push(`${fileCount} file changes`);
-        if (cmdCount > 0)
-            parts.push(`${cmdCount} commands`);
-        return parts.length > 0 ? `Session with ${parts.join(', ')}` : undefined;
+        if (promptCount > 0)
+            parts.push(`${promptCount} prompt${promptCount > 1 ? 's' : ''}`);
+        if (actionCount > 0)
+            parts.push(`${actionCount} action${actionCount > 1 ? 's' : ''}`);
+        if (terminalCount > 0)
+            parts.push(`${terminalCount} command${terminalCount > 1 ? 's' : ''}`);
+        return parts.length > 0 ? `Workflow with ${parts.join(', ')}` : undefined;
     }
     /**
      * Try to infer tags from file extensions and content
@@ -282,57 +338,44 @@ class BuildlogExporter {
         return Array.from(tags).slice(0, 10);
     }
     /**
-     * Detect natural chapter breaks in the content
+     * Try to infer outcome from the session
      */
-    detectChapters(entries) {
-        const chapters = [];
-        for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
-            // Look for user messages that start a new topic
-            if (entry.type === 'user' && entry.content) {
-                const content = entry.content.toLowerCase();
-                // Check for chapter-like phrases
-                const chapterPatterns = [
-                    /^(now|next|let's|let us|can you|please)\s+(create|build|add|implement|fix|update|refactor)/i,
-                    /^(step|part|phase)\s+\d+/i,
-                    /^(first|second|third|finally|lastly)/i,
-                ];
-                for (const pattern of chapterPatterns) {
-                    if (pattern.test(content)) {
-                        const title = this.extractChapterTitle(entry.content);
-                        chapters.push({ title, startIndex: i });
-                        break;
-                    }
-                }
-            }
+    inferOutcome(history) {
+        const lastMessage = history.messages.findLast((m) => m.role === 'assistant');
+        if (!lastMessage)
+            return undefined;
+        const content = lastMessage.content.toLowerCase();
+        // Look for success indicators
+        const successIndicators = ['done', 'complete', 'finished', 'works', 'success'];
+        const hasSuccess = successIndicators.some((i) => content.includes(i));
+        // Look for failure indicators
+        const failureIndicators = ['error', 'failed', 'doesn\'t work', 'issue', 'problem'];
+        const hasFailure = failureIndicators.some((i) => content.includes(i));
+        if (hasSuccess && !hasFailure) {
+            return {
+                status: 'completed',
+                summary: 'Workflow completed successfully',
+            };
         }
-        return chapters;
-    }
-    /**
-     * Extract a chapter title from a message
-     */
-    extractChapterTitle(content) {
-        const firstLine = content.split('\n')[0];
-        if (firstLine.length <= 50) {
-            return firstLine;
+        else if (hasFailure && !hasSuccess) {
+            return {
+                status: 'failed',
+                summary: 'Workflow encountered issues',
+            };
         }
-        return firstLine.slice(0, 47) + '...';
-    }
-    /**
-     * Truncate content to max size
-     */
-    truncateContent(content) {
-        const maxBytes = (this.options.maxFileSizeKb ?? 100) * 1024;
-        if (content.length <= maxBytes) {
-            return content;
-        }
-        return content.slice(0, maxBytes) + '\n... [truncated]';
+        return undefined;
     }
     /**
      * Generate a unique ID
      */
     generateId() {
         return `bl_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    }
+    /**
+     * Capitalize first letter
+     */
+    capitalizeFirst(str) {
+        return str.charAt(0).toUpperCase() + str.slice(1);
     }
 }
 exports.BuildlogExporter = BuildlogExporter;

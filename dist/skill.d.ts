@@ -20,8 +20,8 @@ export interface SkillConfig {
     apiKey?: string;
     autoUpload?: boolean;
     defaultPublic?: boolean;
-    includeFileContents?: boolean;
-    maxFileSizeKb?: number;
+    fullFormat?: boolean;
+    aiProvider?: string;
 }
 export interface CommandMatch {
     pattern: RegExp;
@@ -29,6 +29,9 @@ export interface CommandMatch {
 }
 /**
  * BuildlogSkill - Main skill implementation for OpenClaw
+ *
+ * v2: Captures workflow recipes, not session replays.
+ * Prompts are the artifact. Code is ephemeral.
  */
 export declare class BuildlogSkill {
     private recorder;
@@ -59,13 +62,13 @@ export declare class BuildlogSkill {
     private handleExportLastN;
     private handleUpload;
     private handleShare;
+    private handleAddPrompt;
+    private handleAddAction;
     private handleAddNote;
-    private handleAddChapter;
-    private handleMarkImportant;
+    private handleAddCheckpoint;
     private handleStatus;
     private handleInfo;
     private subscribeToEvents;
-    private sessionToBuildlog;
     private uploadBuildlog;
 }
 /**

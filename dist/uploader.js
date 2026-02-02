@@ -157,7 +157,7 @@ class BuildlogUploader {
         const url = `${this.config.baseUrl}${path}`;
         const headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'buildlog-openclaw-skill/1.0.0',
+            'User-Agent': 'buildlog-openclaw-skill/2.0.0',
         };
         if (this.config.apiKey) {
             headers['Authorization'] = `Bearer ${this.config.apiKey}`;

@@ -1,7 +1,8 @@
 /**
  * @buildlog/openclaw-skill
  * 
- * Record, export, and share your AI coding sessions as replayable buildlogs.
+ * Capture workflow recipes from AI coding sessions.
+ * Prompts are the artifact. Code is ephemeral.
  * 
  * @example
  * ```typescript
@@ -11,6 +12,7 @@
  *   apiKey: 'your-api-key',
  *   autoUpload: false,
  *   defaultPublic: true,
+ *   fullFormat: false, // slim format by default (2-50KB)
  * });
  * 
  * await skill.initialize(openClawContext);
@@ -27,21 +29,16 @@ export type {
   RecorderState,
   RecorderConfig,
   RecordingSession,
-  Note,
-  Chapter,
-  OpenClawEvent,
-  UserMessageEvent,
-  AssistantMessageEvent,
-  FileChangeEvent,
-  TerminalCommandEvent,
 } from './recorder.js';
 
 // Exporter exports
-export { BuildlogExporter, exportSession } from './exporter.js';
+export { BuildlogExporter, exportSession, BUILDLOG_VERSION, DEFAULT_FORMAT, MAX_SLIM_SIZE_BYTES } from './exporter.js';
 export type {
   SessionMessage,
   SessionHistory,
   ExportOptions,
+  FileChangeInfo,
+  TerminalCommandInfo,
 } from './exporter.js';
 
 // Uploader exports
@@ -55,13 +52,19 @@ export type {
 
 // Re-export types
 export type {
-  Buildlog,
-  BuildlogEntry,
+  BuildlogFile,
+  BuildlogStep,
   BuildlogMetadata,
-  FileChange,
-  TerminalCommand,
-  BuildlogChapter,
+  PromptStep,
+  ActionStep,
+  TerminalStep,
+  NoteStep,
+  CheckpointStep,
+  ErrorStep,
+  NoteCategory,
 } from './types.js';
+
+export { STEP_TYPE_ICONS } from './types.js';
 
 // Default export for OpenClaw skill registration
 import { BuildlogSkill } from './skill.js';

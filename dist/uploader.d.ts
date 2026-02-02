@@ -1,4 +1,4 @@
-import type { Buildlog } from './types.js';
+import type { BuildlogFile } from './types.js';
 export interface UploadConfig {
     apiKey?: string;
     baseUrl?: string;
@@ -40,11 +40,11 @@ export declare class BuildlogUploader {
     /**
      * Upload a buildlog
      */
-    upload(buildlog: Buildlog, options?: UploadOptions): Promise<UploadResult>;
+    upload(buildlog: BuildlogFile, options?: UploadOptions): Promise<UploadResult>;
     /**
      * Update an existing buildlog
      */
-    update(id: string, buildlog: Partial<Buildlog>): Promise<UploadResult>;
+    update(id: string, buildlog: Partial<BuildlogFile>): Promise<UploadResult>;
     /**
      * Delete a buildlog
      */
@@ -70,7 +70,7 @@ export declare class BuildlogUploader {
     /**
      * Generate a shareable link (for anonymous uploads)
      */
-    createShareLink(buildlog: Buildlog): Promise<UploadResult>;
+    createShareLink(buildlog: BuildlogFile): Promise<UploadResult>;
     /**
      * Validate API key
      */
@@ -93,5 +93,5 @@ export declare class UploadError extends Error {
 /**
  * Convenience function to upload a buildlog
  */
-export declare function uploadBuildlog(buildlog: Buildlog, config?: UploadConfig, options?: UploadOptions): Promise<UploadResult>;
+export declare function uploadBuildlog(buildlog: BuildlogFile, config?: UploadConfig, options?: UploadOptions): Promise<UploadResult>;
 //# sourceMappingURL=uploader.d.ts.map

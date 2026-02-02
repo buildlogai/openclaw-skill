@@ -1,27 +1,22 @@
-import type { Buildlog, BuildlogEntry, BuildlogMetadata, FileChange, TerminalCommand } from './types.js';
+import type { BuildlogFile, BuildlogStep, BuildlogMetadata, NoteCategory, OutcomeStatus, AIProvider } from './types.js';
 export type RecorderState = 'idle' | 'recording' | 'paused';
 export interface RecorderConfig {
-    includeFileContents: boolean;
-    maxFileSizeKb: number;
-}
-export interface Note {
-    timestamp: number;
-    text: string;
-    entryIndex: number;
-}
-export interface Chapter {
-    title: string;
-    entryIndex: number;
-    timestamp: number;
+    /** Whether to include full AI responses and diffs (full format) */
+    fullFormat: boolean;
+    /** Default AI provider */
+    aiProvider: AIProvider;
+    /** Model name */
+    model?: string;
 }
 export interface RecordingSession {
     id: string;
     title: string;
     startedAt: number;
-    entries: BuildlogEntry[];
-    notes: Note[];
-    chapters: Chapter[];
+    steps: BuildlogStep[];
+    sequenceCounter: number;
     metadata: Partial<BuildlogMetadata>;
+    filesCreated: Set<string>;
+    filesModified: Set<string>;
 }
 export interface OpenClawEvent {
     type: 'user_message' | 'assistant_message' | 'file_change' | 'terminal_command' | 'tool_use';
@@ -50,15 +45,26 @@ export interface AssistantMessageEvent extends OpenClawEvent {
 }
 export interface FileChangeEvent extends OpenClawEvent {
     type: 'file_change';
-    data: FileChange;
+    data: {
+        path: string;
+        action: 'create' | 'modify' | 'delete';
+        diff?: string;
+    };
 }
 export interface TerminalCommandEvent extends OpenClawEvent {
     type: 'terminal_command';
-    data: TerminalCommand;
+    data: {
+        command: string;
+        output?: string;
+        exitCode?: number;
+    };
 }
 type EventHandler = (event: OpenClawEvent) => void;
 /**
- * BuildlogRecorder - State machine for recording OpenClaw sessions
+ * BuildlogRecorder v2 - Slim workflow format
+ *
+ * Key change from v1: Prompts are the primary artifact.
+ * We capture the workflow, not the full file contents.
  *
  * States: idle -> recording <-> paused -> idle
  */
@@ -67,7 +73,8 @@ export declare class BuildlogRecorder {
     private session;
     private config;
     private eventHandlers;
-    private pendingUserMessage;
+    private lastPromptStep;
+    private pendingFileChanges;
     constructor(config?: Partial<RecorderConfig>);
     /**
      * Get current recorder state
@@ -86,9 +93,12 @@ export declare class BuildlogRecorder {
      */
     start(title: string, metadata?: Partial<BuildlogMetadata>): void;
     /**
-     * Stop recording and return the session
+     * Stop recording and return the buildlog
      */
-    stop(): RecordingSession | null;
+    stop(outcome?: {
+        status: OutcomeStatus;
+        summary: string;
+    }): BuildlogFile | null;
     /**
      * Pause recording
      */
@@ -102,17 +112,42 @@ export declare class BuildlogRecorder {
      */
     handleEvent(event: OpenClawEvent): void;
     /**
-     * Add a note at the current position
+     * Manually add a prompt step
      */
-    addNote(text: string): void;
+    addPrompt(content: string, options?: {
+        context?: string[];
+        intent?: string;
+    }): void;
     /**
-     * Add a chapter marker
+     * Manually add an action step
      */
-    addChapter(title: string): void;
+    addAction(summary: string, options?: {
+        filesCreated?: string[];
+        filesModified?: string[];
+        filesDeleted?: string[];
+        approach?: string;
+        aiResponse?: string;
+    }): void;
     /**
-     * Mark the last entry as important
+     * Add a note step
      */
-    markImportant(): void;
+    addNote(content: string, category?: NoteCategory): void;
+    /**
+     * Add a checkpoint step
+     */
+    addCheckpoint(label: string, summary?: string): void;
+    /**
+     * Track a file change for the current action
+     */
+    trackFileChange(path: string, changeType: 'created' | 'modified' | 'deleted'): void;
+    /**
+     * Add a terminal command step
+     */
+    addTerminal(command: string, cwd?: string, exitCode?: number): void;
+    /**
+     * Add an error step
+     */
+    addError(message: string, resolved?: boolean, resolution?: string): void;
     /**
      * Get recording status
      */
@@ -120,15 +155,17 @@ export declare class BuildlogRecorder {
         state: RecorderState;
         sessionId?: string;
         title?: string;
-        entryCount: number;
+        stepCount: number;
+        promptCount: number;
         duration: number;
-        noteCount: number;
-        chapterCount: number;
     };
     /**
      * Convert session to Buildlog format
      */
-    toBuildlog(): Buildlog | null;
+    toBuildlog(outcome?: {
+        status: OutcomeStatus;
+        summary: string;
+    }): BuildlogFile | null;
     /**
      * Subscribe to recorder events
      */
@@ -137,7 +174,12 @@ export declare class BuildlogRecorder {
     private handleAssistantMessage;
     private handleFileChange;
     private handleTerminalCommand;
-    private truncateContent;
+    /**
+     * Flush pending file changes into an action step
+     */
+    private flushPendingChanges;
+    private generateActionSummary;
+    private getTimestamp;
     private generateId;
     private emit;
 }
