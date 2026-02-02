@@ -1,0 +1,53 @@
+{
+  "name": "@buildlog/openclaw-skill",
+  "version": "1.0.0",
+  "description": "Record, export, and share your AI coding sessions as replayable buildlogs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "SKILL.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest"
+  },
+  "keywords": [
+    "openclaw",
+    "skill",
+    "buildlog",
+    "ai",
+    "coding",
+    "recording",
+    "session"
+  ],
+  "author": "buildlog.ai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/buildlog/openclaw-skill.git"
+  },
+  "homepage": "https://buildlog.ai",
+  "bugs": {
+    "url": "https://github.com/buildlog/openclaw-skill/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@openclaw/sdk": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@openclaw/sdk": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
